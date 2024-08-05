@@ -1,0 +1,133 @@
+import os
+import time
+import qrcode
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
+from urllib.parse import urljoin
+from office365.sharepoint.client_context import ClientContext
+from office365.runtime.auth.user_credential import UserCredential
+
+# Configurações de autenticação
+site_url = 
+username = 
+password = 
+library_name = 
+check_interval = 5 # Intervalo de verificação em 7200 segundos
+
+# Autenticaçãod
+credentials = UserCredential(username, password)
+ctx = ClientContext(site_url).with_credentials(credentials)
+
+# Função para gerar um QRCode para uma URL de arquivo e retornar como uma imagem em bytes
+def generate_qr_code_image(name, url):
+    print(f"Generating QR code for URL: {url}")
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="#0CB7F2").convert('RGB')
+
+    # Adicionar o texto à imagem do QR code
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", 20)
+    except IOError:
+        font = ImageFont.load_default()
+
+    text_bbox = draw.textbbox((0, 0), name, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    img_width, img_height = img.size
+
+    # Posição para o texto
+    text_position = ((img_width - text_width) // 2, img_height - text_height)
+
+    draw.text(text_position, name, fill="black", font=font)
+
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    return buffered.getvalue()
+
+# Função para obter a lista de pastas na biblioteca de documentos
+def get_folders(ctx, library_name):
+    library = ctx.web.lists.get_by_title(library_name)
+    folders = library.root_folder.folders
+    ctx.load(folders)
+    ctx.execute_query()
+    return [folder for folder in folders]
+
+# Função para obter a lista de arquivos em uma pasta
+def get_files_in_folder(ctx, folder):
+    files = folder.files
+    ctx.load(files)
+    ctx.execute_query()
+    return [file for file in files]
+
+# Função para criar um arquivo na lista correspondente ao item da lista
+def create_qr_code_file(ctx, folder, item_title, qr_code_image):
+    file_content = BytesIO(qr_code_image)
+    file_name = f"QRCode_{item_title}.png"
+    folder.upload_file(file_name, file_content.getvalue())
+    ctx.execute_query()
+    print(f"QRCode gerado e salvo como '{file_name}' na pasta '{folder.properties['Name']}'.")
+
+# Função para monitorar a biblioteca SharePoint
+def monitor_sharepoint_library(ctx, library_name):
+    known_folders = set()
+    known_files = {}
+
+    while True:
+        # Obter a lista de pastas na biblioteca
+        folders = get_folders(ctx, library_name)
+        for folder in folders:
+            folder_name = folder.properties['Name']
+            folder_url = urljoin(site_url, folder.properties['ServerRelativeUrl'])
+            print(f"Folder URL: {folder_url}")  # Print para depuração
+
+            if folder_name not in known_folders:
+                # Nova pasta criada
+                print(f"Nova pasta criada: {folder_name}")
+                qr_code_image = generate_qr_code_image(folder_name, folder_url)
+                create_qr_code_file(ctx, folder, folder_name, qr_code_image)
+                known_folders.add(folder_name)
+
+            # Obter a lista de arquivos na pasta
+            current_files = {file.properties['Name']: file for file in get_files_in_folder(ctx, folder)}
+
+            if folder_name not in known_files:
+                known_files[folder_name] = set()
+
+            new_files = set(current_files.keys()) - known_files[folder_name]
+
+            for file_name in new_files:
+                if file_name.startswith("QRCode_"):
+                    # Ignorar arquivos de QRCode
+                    continue
+
+                file = current_files[file_name]
+                item_title = os.path.splitext(file_name)[0]  # Remove a extensão do nome do arquivo
+                file_url = urljoin(site_url, file.properties['ServerRelativeUrl'])
+                print(f"File URL: {file_url}")  # Print para depuração
+                print(f"Novo arquivo adicionado: {file_name} na pasta {folder_name}")
+
+                qr_code_image = generate_qr_code_image(file_name, file_url)
+                create_qr_code_file(ctx, folder, item_title, qr_code_image)
+
+            # Atualizar a lista de arquivos conhecidos após o processamento
+            known_files[folder_name].update(current_files.keys())
+
+        time.sleep(check_interval)
+
+# Testar a conexão antes de iniciar o monitoramento
+try:
+    ctx.execute_query()
+    print("Conexão com SharePoint bem-sucedida!")
+except Exception as e:
+    print(f"Erro ao conectar ao SharePoint: {e}")
+
+# Iniciar o monitoramento
+monitor_sharepoint_library(ctx, library_name)
